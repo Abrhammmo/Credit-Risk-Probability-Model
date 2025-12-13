@@ -9,7 +9,8 @@ __pycache__/
 
 
 # Data
-data/raw
+# data/raw
+data/raw/Xente_Variable_Definitions.csv
 
 
 # Distribution / packaging
