@@ -69,3 +69,281 @@ In a Basel II environment, the choice between a simple, interpretable model (lik
 **The Contextual Decision:**
 
 In practice, simple, interpretable models are often mandated for **Regulatory Capital (Pillar 1)** because they minimize the risk of regulatory rejection. Complex models are increasingly used for **internal "Economic Capital" models** or for **operational decisions** (like optimizing collections strategy), where high accuracy is valued over regulatory-grade transparency. Using a complex model for regulatory capital requires exhaustive, sophisticated, and often *post-hoc* explainability techniques (like SHAP or LIME) to satisfy the high burden of proof for interpretability.
+
+---
+
+## Task 3 — Feature Engineering (Customer-Level Features)
+
+The feature engineering process transforms raw transaction-level data into **customer-level features** suitable for predictive modeling. Key steps include:
+
+1. **Customer Aggregation**:
+
+   * Summarizes transactions at the customer level.
+   * Example features:
+
+     * `Total_Transaction_Amount`
+     * `Average_Transaction_Amount`
+     * `Transaction_Count`
+     * `Transaction_Recency`
+     * `Night_Transactions`
+     * `Dormant_Flag`
+
+2. **Feature Engineering**:
+
+   * Compute derived features such as:
+
+     * `Avg_Amount_By_Category`
+     * `Count_By_FraudResult`
+     * `Night_Txn_Ratio`
+     * `Amount_CV` (coefficient of variation)
+     * `Log_Total_Amount`
+
+3. **Missing Value Handling**:
+
+   * Numeric features: imputed using median.
+   * Categorical features: imputed using most frequent value.
+
+4. **Binning & Encoding**:
+
+   * Continuous features are discretized using quantile binning.
+   * Categorical features are transformed using Weight-of-Evidence (WoE) encoding for interpretability.
+
+5. **Modular Pipeline Implementation**:
+
+   * All transformations are implemented in `src/data_processing.py` and wrapped in a scikit-learn `Pipeline`.
+   * This ensures reproducibility, easy experimentation, and proper integration with downstream model training.
+
+**Example Usage**:
+
+```python
+from src.data_processing import create_feature_pipeline
+
+# Load raw data
+df = pd.read_csv("data/raw/data.csv")
+
+# Build feature pipeline
+feature_pipeline = create_feature_pipeline(df)
+X = feature_pipeline.fit_transform(df)
+```
+
+---
+
+## Task 4 — Proxy Target Variable Engineering
+
+Regulatory default events are rare or delayed, requiring a **proxy target** for supervised learning.
+
+1. **RFM Clustering**:
+
+   * Customers are clustered based on **Recency, Frequency, and Monetary (RFM)** behavior.
+   * K-Means clustering identifies high-risk segments.
+
+2. **Proxy Target Definition**:
+
+   * `is_high_risk` is set to 1 for customers in clusters representing high default likelihood.
+   * This target is merged with the customer-level features for model training.
+
+**Example Usage**:
+
+```python
+from src.data_processing import create_proxy_target
+
+proxy_target, cluster_summary = create_proxy_target(df)
+y = proxy_target["is_high_risk"]
+```
+
+---
+
+## Task 5 — Model Training and Experiment Tracking
+
+1. **Train/Test Split**:
+
+   * Split customer-level features (`X`) and target (`y`) into training and testing sets using stratification to preserve class distribution.
+
+```python
+from src.train import split_data
+X_train, X_test, y_train, y_test = split_data(X, y, test_size=0.2, random_state=42)
+```
+
+2. **Model Selection**:
+
+   * Logistic Regression (interpretable, regulatory-friendly).
+   * Decision Tree (handles non-linearities).
+
+3. **Training & MLflow Logging**:
+
+   * Each model is trained and evaluated with metrics: `accuracy`, `precision`, `recall`, `f1`.
+   * MLflow automatically logs parameters, metrics, and model artifacts for experiment tracking.
+
+```python
+from src.train import train_logistic_regression, train_decision_tree
+
+lr_model, lr_metrics = train_logistic_regression(X_train, y_train, X_test, y_test)
+dt_model, dt_metrics = train_decision_tree(X_train, y_train, X_test, y_test)
+```
+
+4. **Best Model Selection**:
+
+   * The model with the highest F1 score (or another chosen metric) is selected.
+   * Registered in the MLflow Model Registry for deployment.
+
+```python
+from mlflow.tracking import MlflowClient
+
+client = MlflowClient()
+best_run = max(runs, key=lambda r: r.data.metrics["f1"])
+mlflow.register_model(model_uri=f"runs:/{best_run.info.run_id}/model", name="Credit_Risk_Model")
+```
+
+---
+
+## Task 6 — Model Deployment and Continuous Integration
+
+The best model is exposed via a **REST API** and containerized for production deployment.
+
+### 1. API Development (FastAPI)
+
+* **Location**: `src/api/main.py`
+* **Endpoints**:
+
+  * `/predict`: Accepts a POST request with customer-level features and returns predicted risk probability.
+* **Input/Output Validation**: Implemented using Pydantic models (`src/api/pydantic_models.py`).
+
+**Example Input**:
+
+```json
+{
+  "Total_Transaction_Amount": 15000,
+  "Average_Transaction_Amount": 2000,
+  "Transaction_Count": 7,
+  ...
+}
+```
+
+**Example Response**:
+
+```json
+{
+  "risk_probability": 0.87
+}
+```
+
+**Start API locally**:
+
+```bash
+uvicorn src.api.main:app --reload
+```
+
+### 2. Containerization
+
+* **Dockerfile** sets up the Python environment and installs dependencies.
+* **docker-compose.yml** orchestrates container build and execution.
+
+**Build and run**:
+
+```bash
+docker-compose build
+docker-compose up
+```
+
+* Service is available at `http://localhost:8000/predict`.
+
+### 3. Continuous Integration (GitHub Actions)
+
+* Workflow located at `.github/workflows/ci.yml`.
+* Executes on every push to `main`.
+* Steps include:
+
+  * **Linting**: Using `flake8` to enforce code quality.
+  * **Unit Testing**: Using `pytest` to validate feature engineering and helper functions.
+* Builds fail if linter or tests fail.
+
+---
+
+## Unit Testing
+
+* Tests are located in `test/test_data_processing.py`.
+* Covers:
+
+  * Correct output of feature engineering functions.
+  * Proxy target variable creation.
+* Run tests:
+
+```bash
+pytest -v
+```
+
+---
+
+## Deployment Steps for New Users
+
+1. **Clone Repository**:
+
+```bash
+git clone https://github.com/yourusername/Credit-Risk-Probability-Model.git
+cd Credit-Risk-Probability-Model
+```
+
+2. **Set Up Environment**:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+.venv\Scripts\activate     # Windows
+pip install -r requirements.txt
+```
+
+3. **Prepare Data**:
+
+* Place raw transaction data in `data/raw/data.csv`.
+* Ensure column names match the pipeline expectations.
+
+4. **Feature Engineering & Target Creation**:
+
+```python
+from src.data_processing import create_feature_pipeline, create_proxy_target
+
+df = pd.read_csv("data/raw/data.csv")
+proxy_target, cluster_summary = create_proxy_target(df)
+y = proxy_target["is_high_risk"]
+feature_pipeline = create_feature_pipeline(df)
+X = feature_pipeline.fit_transform(df, y=y)
+```
+
+5. **Train and Register Models**:
+
+```python
+from src.train import split_data, train_logistic_regression, train_decision_tree
+X_train, X_test, y_train, y_test = split_data(X, y)
+lr_model, lr_metrics = train_logistic_regression(X_train, y_train, X_test, y_test)
+dt_model, dt_metrics = train_decision_tree(X_train, y_train, X_test, y_test)
+```
+
+6. **Select and Register Best Model**:
+
+* Choose model based on F1 score.
+* Register with MLflow:
+
+```python
+from mlflow.tracking import MlflowClient
+client = MlflowClient()
+# Select best run ID here and register
+mlflow.register_model(model_uri=f"runs:/{best_run_id}/model", name="Credit_Risk_Model")
+```
+
+7. **Deploy API**:
+
+* Start FastAPI service locally:
+
+```bash
+uvicorn src.api.main:app --reload
+```
+
+* Or run via Docker:
+
+```bash
+docker-compose up
+```
+
+* Test `/predict` endpoint with customer features.
+
+
